@@ -1,0 +1,43 @@
+{
+  "name": "portview",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local port scanner with a live web viewer: every open port, its name, and the process that owns it.",
+  "keywords": [
+    "port-scanner",
+    "ports",
+    "netstat",
+    "localhost",
+    "developer-tools",
+    "diagnostics"
+  ],
+  "license": "MIT",
+  "main": "server.js",
+  "bin": {
+    "portview": "server.js"
+  },
+  "files": [
+    "server.js",
+    "scanner.js",
+    "services.js",
+    "process-lookup.js",
+    "web-detect.js",
+    "port-names.js",
+    "port-names.example.json",
+    "public/"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test",
+    "lint": "node --check server.js && node --check scanner.js && node --check services.js && node --check process-lookup.js && node --check web-detect.js && node --check port-names.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ]
+}

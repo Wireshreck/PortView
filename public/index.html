@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PortView — Open Port Viewer</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b0f14'/><circle cx='16' cy='16' r='6' fill='none' stroke='%2337d67a' stroke-width='2.5'/><circle cx='16' cy='16' r='2' fill='%2337d67a'/></svg>" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".35"/>
+      <circle cx="16" cy="16" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="16" cy="16" r="2.5" fill="currentColor"/>
+      <path d="M16 2v5M16 25v5M2 16h5M25 16h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <div class="brand-text">
+      <h1>PortView</h1>
+      <span class="brand-sub">open port viewer</span>
+    </div>
+  </div>
+
+  <div class="conn">
+    <span id="connDot" class="dot dot-idle"></span>
+    <span id="connText">connecting…</span>
+  </div>
+</header>
+
+<section class="controls">
+  <div class="field">
+    <label for="target">Target</label>
+    <select id="target">
+      <option value="localhost" selected>This machine (127.0.0.1 + ::1)</option>
+      <option value="127.0.0.1">127.0.0.1 (IPv4 loopback)</option>
+      <option value="::1">::1 (IPv6 loopback)</option>
+      <option value="lan">LAN addresses</option>
+      <option value="all">Everything (LAN + loopback)</option>
+      <option value="custom">Custom address…</option>
+    </select>
+  </div>
+
+  <div class="field hidden" id="customField">
+    <label for="customTarget">Address / host</label>
+    <input id="customTarget" type="text" placeholder="192.168.1.10 or example.com" spellcheck="false" />
+  </div>
+
+  <div class="field">
+    <label for="protocol">Protocol</label>
+    <select id="protocol">
+      <option value="tcp" selected>TCP</option>
+      <option value="udp">UDP</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="portSet">Port range</label>
+    <select id="portSet">
+      <option value="all" selected>All (1–65535)</option>
+      <option value="common">Common ports</option>
+      <option value="wellknown">Well-known (1–1023)</option>
+      <option value="registered">Registered (1024–49151)</option>
+      <option value="dynamic">Dynamic (49152–65535)</option>
+      <option value="range">Custom range…</option>
+    </select>
+  </div>
+
+  <div class="field hidden" id="rangeField">
+    <label>Range</label>
+    <div class="range-inputs">
+      <input id="startPort" type="number" min="1" max="65535" value="1" placeholder="from" />
+      <span class="dash">–</span>
+      <input id="endPort" type="number" min="1" max="65535" value="65535" placeholder="to" />
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="watch">Watch</label>
+    <select id="watch">
+      <option value="0" selected>Off</option>
+      <option value="15000">Every 15s</option>
+      <option value="30000">Every 30s</option>
+      <option value="60000">Every 60s</option>
+      <option value="300000">Every 5m</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Probe mode</label>
+    <label class="chip" title="Read the OS listener table only. Instant, but nothing outside the listener table is discovered.">
+      <input type="checkbox" id="deepProbe" checked />
+      <span>deep probe every port</span>
+    </label>
+  </div>
+
+  <div class="actions">
+    <button id="scanBtn" class="btn btn-primary">
+      <span class="btn-label">Scan</span>
+    </button>
+    <button id="stopBtn" class="btn btn-ghost" disabled>Stop</button>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stat">
+    <span class="stat-value" id="statOpen">0</span>
+    <span class="stat-label">open ports</span>
+  </div>
+  <div class="stat">
+    <span class="stat-value" id="statScanned">0</span>
+    <span class="stat-label">probes sent</span>
+  </div>
+  <div class="stat">
+    <span class="stat-value" id="statTotal">0</span>
+    <span class="stat-label">total probes</span>
+  </div>
+  <div class="stat">
+    <span class="stat-value" id="statDuration">—</span>
+    <span class="stat-label">duration</span>
+  </div>
+  <div class="stat wide">
+    <span class="stat-value small" id="statStatus">idle</span>
+    <span class="stat-label">status</span>
+  </div>
+</section>
+
+<section class="progress-wrap">
+  <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+  <span class="progress-text" id="progressText">idle</span>
+</section>
+
+<main class="panels">
+  <section class="panel panel-table">
+    <div class="panel-head">
+      <h2>Open ports</h2>
+      <div class="panel-tools">
+        <input id="filter" type="search" placeholder="Filter port, name, service, process…" spellcheck="false" />
+        <label class="chip" title="Only show ports confirmed by the OS listener table. Unavailable for remote targets, where every hit is a probe result.">
+          <input type="checkbox" id="listeningOnly" />
+          <span>listening only</span>
+        </label>
+        <button id="namesBtn" class="btn btn-mini" title="Manage your port names">Names</button>
+        <button id="refreshBtn" class="btn btn-mini" title="Re-resolve process names">Processes</button>
+        <a id="exportJson" class="btn btn-mini" href="/api/export?format=json" download>JSON</a>
+        <a id="exportCsv" class="btn btn-mini" href="/api/export?format=csv" download>CSV</a>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table id="portsTable">
+        <thead>
+          <tr>
+            <th class="col-port">PORT</th>
+            <th class="col-name">NAME</th>
+            <th class="col-proto">PROTO</th>
+            <th class="col-state">STATE</th>
+            <th class="col-svc">SERVICE</th>
+            <th class="col-pid">PID</th>
+            <th class="col-proc">PROCESS</th>
+            <th class="col-addr">ADDRESS</th>
+            <th class="col-open"></th>
+          </tr>
+        </thead>
+        <tbody id="portsBody"></tbody>
+      </table>
+      <div class="empty" id="emptyState">
+        <div class="empty-icon">◍</div>
+        <p>No open ports found yet.</p>
+        <span>Press <kbd>Scan</kbd> to probe every port on this machine.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel panel-log">
+    <div class="panel-head">
+      <h2>Activity</h2>
+      <button id="clearLog" class="btn btn-mini">Clear</button>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<footer class="footer">
+  <span id="hostInfo"></span>
+  <span class="footer-sep">•</span>
+  <span>PortView — local network utility</span>
+</footer>
+
+<div class="modal-backdrop hidden" id="namesModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="namesTitle">
+    <div class="modal-head">
+      <h3 id="namesTitle">Your port names</h3>
+      <button id="namesClose" class="btn btn-mini" aria-label="Close">✕</button>
+    </div>
+    <p class="modal-hint">
+      Names you set are stored in <code>port-names.json</code> and shown next to the port.
+      Click any name in the table to rename it.
+    </p>
+    <div class="modal-body" id="namesBody"></div>
+    <div class="modal-foot">
+      <span class="modal-path" id="namesPath"></span>
+      <button id="namesAdd" class="btn btn-mini">Add a name</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
