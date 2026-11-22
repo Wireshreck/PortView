@@ -5,11 +5,8 @@ A local port scanner with a live web viewer, served on **http://localhost:6969**
 PortView answers the question *"what ports are open on this machine?"* and shows
 the answer with the owning process for each port.
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/Wireshreck/PortView/actions/workflows/ci.yml/badge.svg)](https://github.com/Wireshreck/PortView/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-> Replace `OWNER/REPO` in the badge above with your GitHub repository path
-> before you push.
 
 ## Quick start
 
