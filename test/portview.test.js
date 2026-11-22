@@ -11,6 +11,7 @@ const scanner = require('../scanner');
 const { parseNetstat, detectProject } = require('../process-lookup');
 const { extractTitle } = require('../web-detect');
 const { createStore } = require('../port-names');
+const launchers = require('../launchers');
 
 /* ------------------------------------------------------------------ *
  * Port catalogue
@@ -259,4 +260,139 @@ test('a missing names file is not an error', () => {
   const store = createStore(path.join(os.tmpdir(), `portview-missing-${process.pid}.json`));
   assert.deepEqual(store.all(), {});
   assert.equal(store.get(3000), null);
+});
+
+/* ------------------------------------------------------------------ *
+ * Saved start commands
+ * ------------------------------------------------------------------ */
+
+test('a command line is split into the program and its arguments', () => {
+  const parsed = launchers.parseCommandLine('"C:\\Program Files\\nodejs\\node.exe" app.js --port 3000');
+  assert.equal(parsed.exe, 'C:\\Program Files\\nodejs\\node.exe');
+  assert.deepEqual(parsed.args, ['app.js', '--port', '3000']);
+});
+
+test('a shell wrapper is unwrapped to the command a person would type', () => {
+  assert.equal(
+    launchers.unwrapShell('cmd.exe /d /s /c "npm run dev"'),
+    'npm run dev'
+  );
+  assert.equal(
+    launchers.unwrapShell('"C:\\Windows\\System32\\cmd.exe" /c "node server.js"'),
+    'node server.js'
+  );
+});
+
+test('a plain command is left alone', () => {
+  assert.equal(
+    launchers.unwrapShell('"C:\\Python\\python.exe" -m http.server 8000'),
+    '"C:\\Python\\python.exe" -m http.server 8000'
+  );
+});
+
+test('operating system processes are never launchable', () => {
+  assert.ok(launchers.isSystemImage('svchost.exe'));
+  assert.ok(launchers.isSystemImage('C:\\Windows\\System32\\lsass.exe'));
+  assert.ok(launchers.isSystemImage('System'));
+  assert.ok(!launchers.isSystemImage('node.exe'));
+  assert.ok(!launchers.isSystemImage('python.exe'));
+});
+
+test('commands that look like they hold a credential are flagged', () => {
+  assert.ok(launchers.looksSensitive('app --token abc123'));
+  assert.ok(launchers.looksSensitive('app --api-key=xyz'));
+  assert.ok(launchers.looksSensitive('app --password hunter2'));
+  assert.ok(!launchers.looksSensitive('node server.js --port 3000'));
+});
+
+test('a program on disk is found, a made-up one is not', () => {
+  assert.equal(launchers.findExecutable(process.execPath), process.execPath);
+  assert.equal(launchers.findExecutable('definitely-not-a-real-program-xyz'), null);
+});
+
+test('the working directory comes from the script that was run', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portview-cwd-'));
+  const script = path.join(dir, 'server.js');
+  try {
+    fs.writeFileSync(script, '// test\n');
+    assert.equal(launchers.inferCwd(`"${process.execPath}" "${script}"`), dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a package directory wins over the script folder', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'portview-project-'));
+  try {
+    assert.equal(launchers.inferCwd('node server.js', project), project);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('start commands are remembered, read back and forgotten', () => {
+  const file = path.join(os.tmpdir(), `portview-launchers-${process.pid}.json`);
+  try {
+    const store = launchers.createStore(file);
+
+    store.remember({
+      port: 4173,
+      protocol: 'tcp',
+      command: 'npm run preview',
+      cwd: 'C:\\work\\app',
+      label: 'My Dashboard',
+      process: 'node.exe',
+    });
+
+    assert.equal(store.get(4173, 'tcp').command, 'npm run preview');
+    assert.equal(store.get(4173, 'tcp').cwd, 'C:\\work\\app');
+
+    const reopened = launchers.createStore(file);
+    assert.equal(reopened.get(4173, 'tcp').label, 'My Dashboard');
+
+    store.forget(4173, 'tcp');
+    assert.equal(store.get(4173, 'tcp'), null);
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
+test('a command with a line break is refused', () => {
+  const file = path.join(os.tmpdir(), `portview-launchers-bad-${process.pid}.json`);
+  try {
+    const store = launchers.createStore(file);
+    assert.equal(store.remember({ port: 3000, command: 'node a.js\nrm -rf /' }), null);
+    assert.equal(store.remember({ port: 3000, command: '   ' }), null);
+    assert.equal(store.remember({ port: 99999, command: 'node a.js' }), null);
+    assert.deepEqual(store.all(), {});
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
+test('tcp and udp commands for the same port are kept apart', () => {
+  const file = path.join(os.tmpdir(), `portview-launchers-proto-${process.pid}.json`);
+  try {
+    const store = launchers.createStore(file);
+    store.remember({ port: 5353, protocol: 'tcp', command: 'tcp-app' });
+    store.remember({ port: 5353, protocol: 'udp', command: 'udp-app' });
+
+    assert.equal(store.get(5353, 'tcp').command, 'tcp-app');
+    assert.equal(store.get(5353, 'udp').command, 'udp-app');
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+test('a relative script with no project folder is not guessed at', () => {
+  assert.equal(launchers.inferCwd('"C:\\nodejs\\node.exe" server.js'), null);
+});
+test('runs of spaces are collapsed outside quotes but kept inside them', () => {
+  assert.equal(
+    launchers.normalizeCommand('"C:\\nodejs\\node.exe"   app.js'),
+    '"C:\\nodejs\\node.exe" app.js'
+  );
+  assert.equal(
+    launchers.normalizeCommand('app --name "two  spaces"'),
+    'app --name "two  spaces"'
+  );
 });

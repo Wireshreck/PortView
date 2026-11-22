@@ -8,7 +8,7 @@ not much ceremony.
 ```bash
 git clone <your fork>
 cd portview
-npm test          # 25 tests, no dependencies needed
+npm test          # 38 tests, no dependencies needed
 npm start         # http://localhost:6969
 ```
 
@@ -41,6 +41,8 @@ build — the viewer is plain HTML, CSS and JavaScript.
 ## What not to commit
 
 - `port-names.json` — your own port names. It is personal and is gitignored.
+- `launchers.json` — the commands behind your ports. Also personal, and also
+  gitignored.
 - Anything from your machine that identifies you: hostnames, IP addresses,
   usernames, absolute paths.
 

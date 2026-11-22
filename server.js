@@ -4,11 +4,24 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const { scan, resolveHosts, buildPortList, lanAddresses, checkTcp } = require('./scanner');
 const { listSockets, candidatePorts, pickSocket, mapProcessNames, mapProcessCommands, detectProject, describeHost } = require('./process-lookup');
 const { detectWeb } = require('./web-detect');
 const portNames = require('./port-names');
+const {
+  createStore: createLauncherStore,
+  keyOf: launcherKeyOf,
+  parseCommandLine,
+  unwrapShell,
+  normalizeCommand,
+  isSystemImage,
+  looksSensitive,
+  inferCwd,
+  isDirectory,
+  findExecutable,
+} = require('./launchers');
 const {
   catalogFor,
   serviceFor,
@@ -58,6 +71,8 @@ const state = {
 
 const clients = new Set();
 const recentLogs = [];
+const launchers = createLauncherStore();
+const launches = new Map(); // "port/proto" -> { pid, at, command }
 let cancelFlag = false;
 let watchTimer = null;
 
@@ -152,6 +167,7 @@ function upsertPort(port, host, protocol, kind) {
  */
 function decorateEntries() {
   const custom = portNames.all();
+  const remembered = launchers.all();
 
   // Drop the placeholders for named ports that are not currently open, they
   // are added back below.
@@ -178,6 +194,9 @@ function decorateEntries() {
     entry.web = !!(mine && mine.url) || entry.web || (entry.title !== null) || !!entry.framework;
     entry.url = (mine && mine.url) || (entry.web ? `${schemeFor(entry.port)}://localhost:${entry.port}/` : null);
 
+    // Only a port that is down can be started again.
+    entry.canLaunch = entry.state === 'stopped' && !!remembered[launcherKeyOf(entry.port, entry.protocol)];
+
     if (mine && mine.section) {
       entry.section = mine.section;
     } else if (mine && mine.label) {
@@ -195,9 +214,11 @@ function decorateEntries() {
 
   // Named ports stay listed even when nothing is running on them, so you can
   // see that one of your apps is down.
-  const open = new Set(state.open.map((e) => e.port));
+  const open = new Set(state.open.map((e) => launcherKeyOf(e.port, e.protocol)));
+  const present = new Set(state.open.map((e) => e.port));
   for (const [port, mine] of Object.entries(custom)) {
-    if (open.has(Number(port))) continue;
+    const key = launcherKeyOf(port, 'tcp');
+    if (present.has(Number(port))) continue;
     if (!mine.label && !mine.url) continue;
 
     state.open.push({
@@ -219,7 +240,44 @@ function decorateEntries() {
       listenAddress: null,
       state: 'stopped',
       placeholder: true,
+      canLaunch: !!remembered[key],
     });
+    open.add(key);
+    present.add(Number(port));
+  }
+
+  // Apps that have been seen before stay listed with a Start button, so a
+  // dev server you closed can be brought back without leaving the page.
+  if (state.local) {
+    for (const [key, launcher] of Object.entries(remembered)) {
+      if (open.has(key) || present.has(launcher.port)) continue;
+      if (launcher.protocol !== state.protocol) continue;
+      if (launcher.port === PORT) continue;
+
+      state.open.push({
+        port: launcher.port,
+        protocol: launcher.protocol,
+        service: serviceFor(launcher.port),
+        label: launcher.label || labelFor(launcher.port) || processLabel(launcher.process) || null,
+        custom: false,
+        title: null,
+        project: null,
+        projectPath: launcher.cwd || null,
+        framework: null,
+        section: 'apps',
+        url: null,
+        web: false,
+        addresses: [],
+        pid: null,
+        process: launcher.process || null,
+        listenAddress: null,
+        state: 'stopped',
+        placeholder: true,
+        canLaunch: true,
+      });
+      open.add(key);
+      present.add(launcher.port);
+    }
   }
 }
 
@@ -288,14 +346,14 @@ async function resolveSockets() {
  * the process that owns it. This is how a local project gets its own name
  * without anyone having to type it in.
  */
-async function detectProjectNames() {
-  const commands = await mapProcessCommands();
-  if (!commands.size) return new Map();
+async function detectProjectNames(commands) {
+  const map = commands || await mapProcessCommands();
+  if (!map.size) return new Map();
 
   const projects = new Map();
   for (const entry of state.open) {
     if (!entry.pid || projects.has(entry.port)) continue;
-    const project = detectProject(commands.get(entry.pid));
+    const project = detectProject(map.get(entry.pid));
     if (project) {
       projects.set(entry.port, project);
       entry.project = project.name;
@@ -303,6 +361,177 @@ async function detectProjectNames() {
     }
   }
   return projects;
+}
+
+/**
+ * Remember how every listening app was started, so it can be started again
+ * after it has been closed.
+ *
+ * Only processes a person could plausibly have launched are kept: the kernel,
+ * service hosts and shell plumbing are skipped, and the command is unwrapped
+ * from `cmd.exe /c` so the useful part is what gets stored.
+ */
+function captureLaunchers(commands) {
+  if (!commands || !commands.size) return 0;
+
+  const custom = portNames.all();
+  let captured = 0;
+
+  for (const entry of state.open) {
+    if (entry.placeholder || entry.state !== 'listening') continue;
+    // PortView cannot restart itself: the running instance owns that port.
+    if (entry.port === PORT) continue;
+    if (!entry.pid) continue;
+
+    const raw = commands.get(entry.pid);
+    if (!raw) continue;
+
+    const command = normalizeCommand(unwrapShell(raw));
+    const { exe } = parseCommandLine(command);
+    if (!exe) continue;
+    if (isSystemImage(exe) || isSystemImage(entry.process)) continue;
+
+    const cwd = entry.projectPath || inferCwd(command);
+    if (!cwd) continue;
+
+    const named = custom[String(entry.port)];
+    const saved = launchers.remember({
+      port: entry.port,
+      protocol: entry.protocol,
+      command,
+      cwd,
+      label: (named && named.label) || entry.label || null,
+      process: entry.process,
+    });
+
+    if (saved) captured++;
+  }
+
+  return captured;
+}
+
+/* ------------------------------------------------------------------ *
+ * Starting a closed port
+ * ------------------------------------------------------------------ */
+
+/**
+ * Start a process that outlives this request.
+ *
+ * On Windows the original command line is handed to the shell, because apps
+ * are often started as `cmd.exe /c npm run dev` and re-splitting that by hand
+ * breaks quoting that already worked once.
+ */
+function spawnDetached(command, exePath, args, cwd) {
+  const options = {
+    cwd: cwd || undefined,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  };
+
+  if (process.platform === 'win32') {
+    return spawn(command, { ...options, shell: true });
+  }
+
+  return spawn(exePath, args, options);
+}
+
+/**
+ * Reject launches that did not come from the viewer itself.
+ *
+ * A launch runs an arbitrary command, so a page on another origin must not be
+ * able to trigger one. Browsers already preflight a JSON POST; this closes the
+ * gap for anything that does not.
+ */
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+
+  try {
+    return new URL(origin).host === String(req.headers.host || '');
+  } catch (_) {
+    return false;
+  }
+}
+
+function launchPort(body = {}) {
+  const port = Number(body.port);
+  const protocol = body.protocol === 'udp' ? 'udp' : 'tcp';
+
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    return { ok: false, reason: 'A valid port number is required.' };
+  }
+
+  const key = launcherKeyOf(port, protocol);
+  const entry = state.open.find((e) => launcherKeyOf(e.port, e.protocol) === key);
+  if (entry && entry.state !== 'stopped') {
+    return { ok: false, reason: `Port ${port} is already open.` };
+  }
+
+  const inFlight = launches.get(key);
+  if (inFlight && Date.now() - inFlight.at < 20000) {
+    return { ok: false, reason: `Port ${port} was started a moment ago. Give it a few seconds.` };
+  }
+
+  const saved = launchers.get(port, protocol);
+  const command = normalizeCommand(
+    body.command !== undefined ? body.command : (saved && saved.command) || ''
+  );
+
+  if (!command) return { ok: false, reason: 'There is no saved command for that port.' };
+  if (command.length > 2000) return { ok: false, reason: 'That command is too long.' };
+  if (/[\r\n]/.test(command)) return { ok: false, reason: 'A command cannot contain a line break.' };
+
+  const { exe, args } = parseCommandLine(command);
+  if (!exe) return { ok: false, reason: 'Could not work out which program to run.' };
+
+  if (isSystemImage(exe)) {
+    return {
+      ok: false,
+      reason: `${path.basename(exe)} is an operating system process and cannot be started from here.`,
+    };
+  }
+
+  const exePath = findExecutable(exe);
+  if (!exePath) return { ok: false, reason: `Could not find "${exe}" on this machine.` };
+
+  const rawCwd = body.cwd !== undefined ? String(body.cwd || '') : (saved && saved.cwd) || '';
+  const cwd = rawCwd.trim() || null;
+  if (cwd && !isDirectory(cwd)) {
+    return { ok: false, reason: `The working directory "${cwd}" does not exist.` };
+  }
+
+  let child;
+  try {
+    child = spawnDetached(command, exePath, args, cwd);
+  } catch (err) {
+    return { ok: false, reason: `Could not start it: ${err.message}` };
+  }
+
+  child.on('error', (err) => {
+    log(`Could not start port ${port}: ${err.message}`, 'error');
+  });
+  child.unref();
+
+  launches.set(key, { pid: child.pid || null, at: Date.now(), command });
+
+  const name = (saved && saved.label) || (entry && entry.label) || `port ${port}`;
+  log(`Starting "${name}" on port ${port}: ${command}`);
+
+  if (looksSensitive(command)) {
+    log('That command may contain a credential. It is kept only in launchers.json.', 'warn');
+  }
+
+  // Look for the port shortly after, so the row updates without pressing Scan.
+  setTimeout(() => {
+    if (state.status === 'scanning') return;
+    const options = { ...(state.lastOptions || {}) };
+    if (!options.target) options.target = state.target;
+    options.deep = false;
+    startScan(options);
+  }, 1500);
+
+  return { ok: true, port, protocol, pid: child.pid || null, command, cwd };
 }
 
 function processNameOf(sock, names) {
@@ -565,14 +794,25 @@ function startScan(options = {}) {
         log(`Page title detection failed: ${err.message}`, 'warn');
       }
 
+      let commands = null;
       try {
-        const projects = await detectProjectNames();
+        commands = await mapProcessCommands();
+        const projects = await detectProjectNames(commands);
         if (projects.size) {
           const named = [...projects.values()].map((p) => p.name);
           log(`Identified ${named.length} local project${named.length === 1 ? '' : 's'}: ${[...new Set(named)].join(', ')}.`);
         }
       } catch (err) {
         log(`Project detection failed: ${err.message}`, 'warn');
+      }
+
+      try {
+        const remembered = captureLaunchers(commands);
+        if (remembered) {
+          log(`Remembered how ${remembered} app${remembered === 1 ? ' is' : 's are'} started, so you can restart ${remembered === 1 ? 'it' : 'them'} from here.`);
+        }
+      } catch (err) {
+        log(`Could not remember start commands: ${err.message}`, 'warn');
       }
 
       decorateEntries();
@@ -799,6 +1039,43 @@ const server = http.createServer(async (req, res) => {
     decorateEntries();
     broadcast('state', snapshot());
     return sendJson(res, 200, { ok: true, names: portNames.all() });
+  }
+
+  if (pathname === '/api/launchers' && req.method === 'GET') {
+    const port = Number(url.searchParams.get('port'));
+    const protocol = url.searchParams.get('protocol') === 'udp' ? 'udp' : 'tcp';
+
+    if (Number.isFinite(port) && port > 0) {
+      const one = launchers.get(port, protocol);
+      if (!one) return sendJson(res, 404, { error: 'No saved command for that port.' });
+      return sendJson(res, 200, { ...one, sensitive: looksSensitive(one.command) });
+    }
+
+    return sendJson(res, 200, launchers.all());
+  }
+
+  if (pathname === '/api/launch' && req.method === 'POST') {
+    if (!sameOrigin(req)) {
+      return sendJson(res, 403, { error: 'Cross-origin launch requests are not allowed.' });
+    }
+
+    const body = await readBody(req);
+    const result = launchPort(body);
+    if (!result.ok) log(`Launch refused: ${result.reason}`, 'warn');
+    return sendJson(res, result.ok ? 200 : 400, result);
+  }
+
+  if (pathname === '/api/launchers' && req.method === 'DELETE') {
+    const body = await readBody(req);
+    const port = Number(body.port);
+    if (!Number.isFinite(port)) {
+      return sendJson(res, 400, { error: 'A valid port number is required.' });
+    }
+    launchers.forget(port, body.protocol);
+    log(`Forgot the start command for port ${port}.`);
+    decorateEntries();
+    broadcast('state', snapshot());
+    return sendJson(res, 200, { ok: true });
   }
 
   if (pathname === '/api/export') {

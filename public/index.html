@@ -204,6 +204,37 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="launchModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="launchTitle">
+    <div class="modal-head">
+      <h3 id="launchTitle">Start an app</h3>
+      <button id="launchClose" class="btn btn-mini" aria-label="Close">✕</button>
+    </div>
+    <p class="modal-hint" id="launchHint">
+      PortView remembers how this app was started. Check the command before
+      running it — it will execute on this machine.
+    </p>
+    <div class="launch-body">
+      <label class="launch-label" for="launchCommand">Command</label>
+      <textarea id="launchCommand" class="launch-input" rows="3" spellcheck="false"></textarea>
+
+      <label class="launch-label" for="launchCwd">Working directory</label>
+      <input id="launchCwd" class="launch-input" type="text" spellcheck="false" />
+
+      <p class="launch-warning hidden" id="launchWarning">
+        This command looks like it contains a credential. It is stored only in
+        <code>launchers.json</code> on this machine.
+      </p>
+    </div>
+    <div class="modal-foot">
+      <span class="modal-path" id="launchPath">launchers.json</span>
+      <button id="launchForget" class="btn btn-mini" title="Remove the saved command for this port">Forget</button>
+      <button id="launchCancel" class="btn btn-mini">Cancel</button>
+      <button id="launchGo" class="btn btn-primary">Start</button>
+    </div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

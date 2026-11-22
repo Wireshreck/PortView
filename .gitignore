@@ -25,6 +25,10 @@ server.err.log
 # stays out of the repository. Copy port-names.example.json to start from.
 port-names.json
 port-names.local.json
+# launchers.json holds the command lines behind your ports, which can include
+# paths and flags you would rather keep to yourself. It stays local too.
+launchers.json
+launchers.local.json
 .env
 .env.*
 !.env.example

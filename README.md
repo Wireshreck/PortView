@@ -36,6 +36,7 @@ No dependencies — just Node.js 18 or newer.
 | **PROCESS** | Process image name (`node.exe`, `svchost.exe`, …) |
 | **ADDRESS** | Bind addresses the port answers on |
 | **Open** | Opens the port in your browser, when it speaks HTTP |
+| **Start** | Runs the app that used to own the port, when it is down |
 
 Click any row to copy `host:port`. Click a **name** to rename it.
 
@@ -98,6 +99,48 @@ the automatic grouping. `url` is optional too, and sets the address the
 > `port-names.json` is your own data, so it is listed in `.gitignore` and is
 > never committed. To start from the example, copy
 > `port-names.example.json` to `port-names.json`.
+
+## Starting a closed port
+
+While a scan runs, PortView records how each listening app was started: the
+command line of the owning process, its working directory and the name it was
+shown under. When that app is closed, its row stays in **Your Apps** with a
+**Start** button, and pressing it runs the same command again.
+
+The dialog shows the command before anything happens, and both the command and
+the working directory are editable, so a saved command that has drifted can be
+corrected without editing a file.
+
+Only processes a person could plausibly have started are recorded. The kernel,
+Windows service hosts and shell plumbing are skipped, and a command started as
+`cmd.exe /c npm run dev` is unwrapped to `npm run dev`. Commands that reference
+a relative script are not recorded, because Windows does not report a process's
+working directory and guessing would store something that cannot run.
+
+Remembered commands live in `launchers.json`, keyed by port and protocol:
+
+```json
+{
+  "4173/tcp": {
+    "port": 4173,
+    "protocol": "tcp",
+    "command": "npm run preview",
+    "cwd": "C:\\work\\dashboard",
+    "label": "My Dashboard",
+    "process": "node.exe",
+    "capturedAt": 1795334585344
+  }
+}
+```
+
+> `launchers.json` holds command lines, and command lines can contain paths or
+> flags you would rather keep to yourself. It is gitignored, like
+> `port-names.json`, and is never sent anywhere. **Forget** in the dialog
+> removes an entry.
+
+A few things are refused on purpose: a port that is already open, an operating
+system process (`svchost.exe`, `lsass.exe`, …), a program that is not on this
+machine, and a launch request that did not come from the viewer's own origin.
 
 ## How it works
 
@@ -167,6 +210,9 @@ All endpoints return JSON.
 | `/api/names` | GET | All custom port names |
 | `/api/names` | POST | Set a name — `{ port, label, url?, section? }` |
 | `/api/names` | DELETE | Remove a name — `{ port }` |
+| `/api/launchers` | GET | Every saved start command, or one with `?port=…&protocol=…` |
+| `/api/launch` | POST | Run the saved command — `{ port, protocol?, command?, cwd? }` |
+| `/api/launchers` | DELETE | Forget a saved command — `{ port, protocol? }` |
 | `/api/export?format=json\|csv` | GET | Download the results |
 
 ## Configuration
@@ -188,7 +234,9 @@ scanner.js         TCP/UDP probing and target resolution
 process-lookup.js  OS socket table, process names and project detection
 web-detect.js      Page title and content type detection
 port-names.js      Your saved port names (port-names.json)
+launchers.js       Remembered start commands (launchers.json)
 services.js        Port catalogue: names, labels and sections
+scripts/smoke.js   Start, check and stop the server, as CI does
 public/            The viewer (no build step, no framework)
 test/              Tests, run with `npm test`
 ```
@@ -196,8 +244,9 @@ test/              Tests, run with `npm test`
 ## Development
 
 ```bash
-npm test      # 25 tests, no dependencies
+npm test      # 38 tests, no dependencies
 npm run lint  # syntax check across every file
+npm run smoke # start the server on a spare port and check it answers
 ```
 
 ## Contributing
@@ -209,9 +258,10 @@ paths) out of anything you paste into an issue; the issue template asks for it.
 ## Security
 
 PortView reads the listening sockets on your machine and shows which process
-owns each one. It binds to `127.0.0.1` by default, so nothing outside your
-machine can reach it. Please keep it that way on shared networks — see
-[SECURITY.md](SECURITY.md).
+owns each one. It can also run the start command it saved for a port that is
+down, so treat it as you would a shell on that machine. It binds to
+`127.0.0.1` by default, so nothing outside your machine can reach it — please
+keep it that way on shared networks. See [SECURITY.md](SECURITY.md).
 
 ## License
 

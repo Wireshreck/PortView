@@ -10,6 +10,7 @@ let state = { status: 'idle', open: [], scanned: 0, total: 0 };
 const newKeys = new Set(); // ports to flash as newly discovered
 let filterText = '';
 let listeningOnly = false;
+let launchTarget = null; // entry whose Start button was pressed
 
 /* ------------------------------------------------------------------ *
  * Elements
@@ -46,6 +47,17 @@ const el = {
   namesClose: $('#namesClose'),
   namesAdd: $('#namesAdd'),
   namesPath: $('#namesPath'),
+  launchModal: $('#launchModal'),
+  launchTitle: $('#launchTitle'),
+  launchHint: $('#launchHint'),
+  launchCommand: $('#launchCommand'),
+  launchCwd: $('#launchCwd'),
+  launchWarning: $('#launchWarning'),
+  launchPath: $('#launchPath'),
+  launchForget: $('#launchForget'),
+  launchCancel: $('#launchCancel'),
+  launchGo: $('#launchGo'),
+  launchClose: $('#launchClose'),
   clearLog: $('#clearLog'),
   body: $('#portsBody'),
   empty: $('#emptyState'),
@@ -245,8 +257,8 @@ function buildRow(entry) {
   if (entry.custom) nameEl.classList.add('named');
 
   // Open in a browser. An anchor is used rather than window.open so that
-  // popup blockers do not get in the way.
-  if (entry.url) {
+  // popup blockers do not get in the way. A stopped port has nothing to open.
+  if (entry.url && !isStopped) {
     const link = document.createElement('a');
     link.className = 'btn btn-open';
     link.textContent = 'Open';
@@ -256,6 +268,19 @@ function buildRow(entry) {
     link.title = `Open ${entry.url} in your browser`;
     link.addEventListener('click', () => addLog(`Opening ${entry.url}`, 'info'));
     tr.querySelector('.open-cell').appendChild(link);
+  }
+
+  // Restart a port that is down, using the command PortView remembered.
+  if (entry.canLaunch) {
+    const start = document.createElement('button');
+    start.className = 'btn btn-start';
+    start.textContent = 'Start';
+    start.title = `Run the app that used to listen on port ${entry.port}`;
+    start.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openLaunchModal(entry);
+    });
+    tr.querySelector('.open-cell').appendChild(start);
   }
 
   // Name / rename.
@@ -541,6 +566,103 @@ function escapeHtml(text) {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ * Starting a closed port
+ * ------------------------------------------------------------------ */
+
+async function openLaunchModal(entry) {
+  launchTarget = entry;
+
+  el.launchTitle.textContent = `Start ${entry.label || `port ${entry.port}`}`;
+  el.launchPath.textContent = `port ${entry.port} / ${entry.protocol}`;
+  el.launchHint.textContent = 'Loading the command PortView remembered…';
+  el.launchCommand.value = '';
+  el.launchCwd.value = '';
+  el.launchWarning.classList.add('hidden');
+  el.launchGo.disabled = true;
+  el.launchModal.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`/api/launchers?port=${entry.port}&protocol=${entry.protocol}`);
+    const saved = await res.json();
+    if (!res.ok) throw new Error(saved.error || 'No saved command for that port.');
+
+    el.launchCommand.value = saved.command || '';
+    el.launchCwd.value = saved.cwd || '';
+    el.launchWarning.classList.toggle('hidden', !saved.sensitive);
+    el.launchHint.textContent =
+      `This is how ${saved.label || `port ${entry.port}`} was started before. ` +
+      'Check the command before running it — it will execute on this machine.';
+    el.launchGo.disabled = false;
+  } catch (err) {
+    el.launchHint.textContent = `Could not load the saved command: ${err.message}`;
+  }
+}
+
+function closeLaunchModal() {
+  el.launchModal.classList.add('hidden');
+  launchTarget = null;
+}
+
+async function doLaunch() {
+  if (!launchTarget) return;
+
+  el.launchGo.disabled = true;
+  el.launchGo.textContent = 'Starting…';
+
+  try {
+    const res = await fetch('/api/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        port: launchTarget.port,
+        protocol: launchTarget.protocol,
+        command: el.launchCommand.value,
+        cwd: el.launchCwd.value,
+      }),
+    });
+    const body = await res.json();
+
+    if (!body.ok) {
+      addLog(body.reason || body.error || 'Could not start it.', 'error');
+      return;
+    }
+
+    addLog(
+      `Started ${launchTarget.label || `port ${launchTarget.port}`}` +
+        (body.pid ? ` (pid ${body.pid})` : '') + '.',
+      'info'
+    );
+    closeLaunchModal();
+  } catch (err) {
+    addLog(`Launch failed: ${err.message}`, 'error');
+  } finally {
+    el.launchGo.disabled = false;
+    el.launchGo.textContent = 'Start';
+  }
+}
+
+async function forgetLaunch() {
+  if (!launchTarget) return;
+
+  try {
+    const res = await fetch('/api/launchers', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ port: launchTarget.port, protocol: launchTarget.protocol }),
+    });
+    const body = await res.json();
+    if (!body.ok) {
+      addLog(body.error || 'Could not forget that command.', 'error');
+      return;
+    }
+    addLog(`Forgot the start command for port ${launchTarget.port}.`, 'info');
+    closeLaunchModal();
+  } catch (err) {
+    addLog(`Could not forget that command: ${err.message}`, 'error');
+  }
+}
+
 async function applyWatch() {
   const intervalMs = Number(el.watch.value) || 0;
   try {
@@ -606,6 +728,14 @@ el.namesModal.addEventListener('click', (e) => {
   if (e.target === el.namesModal) closeNamesModal();
 });
 
+el.launchClose.addEventListener('click', closeLaunchModal);
+el.launchCancel.addEventListener('click', closeLaunchModal);
+el.launchGo.addEventListener('click', doLaunch);
+el.launchForget.addEventListener('click', forgetLaunch);
+el.launchModal.addEventListener('click', (e) => {
+  if (e.target === el.launchModal) closeLaunchModal();
+});
+
 el.clearLog.addEventListener('click', () => {
   el.log.innerHTML = '';
 });
@@ -626,6 +756,10 @@ document.addEventListener('keydown', (e) => {
     if (!el.scanBtn.disabled) runScan();
   }
   if (e.key === 'Escape') {
+    if (!el.launchModal.classList.contains('hidden')) {
+      closeLaunchModal();
+      return;
+    }
     if (!el.namesModal.classList.contains('hidden')) {
       closeNamesModal();
       return;
