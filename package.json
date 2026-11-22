@@ -30,6 +30,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "test": "node --test",
+    "smoke": "node scripts/smoke.js",
     "lint": "node --check server.js && node --check scanner.js && node --check services.js && node --check process-lookup.js && node --check web-detect.js && node --check port-names.js && node --check public/app.js"
   },
   "engines": {
