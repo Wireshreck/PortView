@@ -4,6 +4,8 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
+const { version } = require('./package.json');
+
 const MAX_BODY = 64 * 1024;
 
 /**
@@ -37,7 +39,7 @@ function fetchInfo(url, timeout) {
         {
           timeout,
           headers: {
-            'User-Agent': 'PortView/1.0',
+            'User-Agent': `PortView/${version}`,
             Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
             Connection: 'close',
           },

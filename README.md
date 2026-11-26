@@ -250,6 +250,8 @@ All endpoints return JSON.
 PORT=8080 node server.js
 ```
 
+On Windows, `start.bat` opens the same port that `PORT` sets (6969 by default).
+
 ## Layout
 
 ```

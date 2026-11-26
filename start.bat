@@ -10,8 +10,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Starting PortView on http://localhost:6969 ...
-start "" http://localhost:6969
+REM The server reads PORT too, so the browser opens the address it will serve.
+if not defined PORT set "PORT=6969"
+
+echo Starting PortView on http://localhost:%PORT% ...
+start "" "http://localhost:%PORT%/"
 node server.js
 
 endlocal

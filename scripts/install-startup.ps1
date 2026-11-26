@@ -71,11 +71,17 @@ $shortcut.WindowStyle = 7
 $shortcut.IconLocation = "$node,0"
 $shortcut.Save()
 
+# The server reads PORT from the login environment, so report the address it
+# will actually use rather than assuming the default.
+$port = [Environment]::GetEnvironmentVariable('PORT', 'User')
+if (-not $port) { $port = [Environment]::GetEnvironmentVariable('PORT', 'Machine') }
+if (-not $port) { $port = '6969' }
+
 Write-Host ''
 Write-Host 'PortView will start at login.' -ForegroundColor Green
 Write-Host "  Shortcut : $link"
 Write-Host "  Command  : $wscript $($shortcut.Arguments)"
 Write-Host "  Folder   : $Repo"
 Write-Host ''
-Write-Host 'It starts hidden in the background. Open http://localhost:6969 to use it.'
+Write-Host "It starts hidden in the background. Open http://localhost:$port to use it."
 Write-Host 'Remove it again with: npm run startup:uninstall'
