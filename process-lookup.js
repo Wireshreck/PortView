@@ -81,37 +81,56 @@ function parseNetstat(out) {
  * `Get-NetTCPConnection -State Listen` is unreliable on some Windows builds
  * (newer kernels report state values the module cannot map, so real listeners
  * come back blank), so every row is fetched and classified locally instead.
+ *
+ * The process table is read in the same invocation. One PowerShell start-up
+ * costs about a second, and the command line is needed for project names and
+ * launch commands anyway, so paying for a second call made every scan slower
+ * for no extra information.
  */
 async function listSocketsPowerShell() {
   const cmd = [
     "$ErrorActionPreference='SilentlyContinue';",
-    "$n = @{};",
-    "Get-Process | ForEach-Object { $n[$_.Id] = $_.ProcessName };",
+    "$p = @{};",
+    "$procs = @(Get-CimInstance Win32_Process | ForEach-Object { $p[[int]$_.ProcessId] = $_; [PSCustomObject]@{ ProcessId=$_.ProcessId; Name=$_.Name; CommandLine=$_.CommandLine } });",
     // Windows services know their own display name, which beats "svchost.exe".
     "$s = @{};",
-    "Get-CimInstance Win32_Service | ForEach-Object { if ($_.ProcessId -gt 0) { $s[$_.ProcessId] = $_.DisplayName } };",
-    "$tcp = Get-NetTCPConnection | ForEach-Object {",
-    "  [PSCustomObject]@{ LocalAddress=$_.LocalAddress; LocalPort=$_.LocalPort; RemotePort=$_.RemotePort; OwningProcess=$_.OwningProcess; Proto='tcp'; Name=$n[$_.OwningProcess]; Service=$s[$_.OwningProcess] }",
-    "};",
-    "$udp = Get-NetUDPEndpoint | ForEach-Object {",
-    "  [PSCustomObject]@{ LocalAddress=$_.LocalAddress; LocalPort=$_.LocalPort; RemotePort=0; OwningProcess=$_.OwningProcess; Proto='udp'; Name=$n[$_.OwningProcess]; Service=$s[$_.OwningProcess] }",
-    "};",
-    "@($tcp) + @($udp) | ConvertTo-Json -Compress -Depth 3",
+    "Get-CimInstance Win32_Service | ForEach-Object { if ($_.ProcessId -gt 0) { $s[[int]$_.ProcessId] = $_.DisplayName } };",
+    "$tcp = @(Get-NetTCPConnection | ForEach-Object { $k = [int]$_.OwningProcess; $proc = $p[$k];",
+    "  [PSCustomObject]@{ LocalAddress=$_.LocalAddress; LocalPort=$_.LocalPort; RemotePort=$_.RemotePort; OwningProcess=$k; Proto='tcp'; Name=$proc.Name; Service=$s[$k] }",
+    "});",
+    "$udp = @(Get-NetUDPEndpoint | ForEach-Object { $k = [int]$_.OwningProcess; $proc = $p[$k];",
+    "  [PSCustomObject]@{ LocalAddress=$_.LocalAddress; LocalPort=$_.LocalPort; RemotePort=0; OwningProcess=$k; Proto='udp'; Name=$proc.Name; Service=$s[$k] }",
+    "});",
+    // Command lines are sent once per process, not once per socket: a busy
+    // machine has many sockets per process and the repeated text made the
+    // payload an order of magnitude larger than it needed to be.
+    "[PSCustomObject]@{ sockets = @($tcp) + @($udp); processes = $procs } | ConvertTo-Json -Compress -Depth 4",
   ].join(' ');
 
   const out = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], 25000);
-  if (!out.trim()) return [];
+  if (!out.trim()) return { sockets: [], commands: new Map() };
 
   let parsed;
   try {
     parsed = JSON.parse(out);
   } catch (_) {
-    return [];
+    return { sockets: [], commands: new Map() };
   }
-  if (!Array.isArray(parsed)) parsed = [parsed];
+
+  const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
+  const socketRows = asArray(parsed && parsed.sockets);
+  const processRows = asArray(parsed && parsed.processes);
+
+  const commands = new Map();
+  for (const proc of processRows) {
+    const pid = Number(proc.ProcessId);
+    if (Number.isFinite(pid) && pid > 0 && proc.CommandLine) {
+      commands.set(pid, String(proc.CommandLine));
+    }
+  }
 
   const results = [];
-  for (const row of parsed) {
+  for (const row of socketRows) {
     const port = Number(row.LocalPort);
     const pid = Number(row.OwningProcess);
     if (!Number.isFinite(port) || port < 1) continue;
@@ -130,7 +149,8 @@ async function listSocketsPowerShell() {
       service: row.Service || null,
     });
   }
-  return results;
+
+  return { sockets: results, commands };
 }
 
 /* ------------------------------------------------------------------ *
@@ -166,19 +186,48 @@ async function listSocketsUnix() {
  * ------------------------------------------------------------------ */
 
 /**
- * All sockets the OS knows about, from every available source.
- * Each row: { address, port, pid, proto, remotePort, state, bound }
+ * All sockets the OS knows about, plus the command line of each owner.
+ * Each socket row: { address, port, pid, proto, remotePort, state, bound }
  */
-async function listSockets() {
-  if (!IS_WINDOWS) return listSocketsUnix();
+async function listSocketTable() {
+  if (!IS_WINDOWS) {
+    const sockets = await listSocketsUnix();
+    return { sockets, commands: commandsFromSockets(sockets) };
+  }
 
-  const [netstatRows, psRows] = await Promise.all([
+  const [netstatRows, ps] = await Promise.all([
     run('netstat', ['-ano']).then(parseNetstat),
     listSocketsPowerShell(),
   ]);
 
-  if (psRows.length) return psRows;
-  return netstatRows;
+  if (ps.sockets.length) return ps;
+  return { sockets: netstatRows, commands: new Map() };
+}
+
+/**
+ * Just the socket rows, for callers that do not need command lines.
+ */
+async function listSockets() {
+  const { sockets } = await listSocketTable();
+  return sockets;
+}
+
+/**
+ * Command lines that socket rows carry themselves.
+ *
+ * Windows keeps them in a separate process list, so this only collects rows
+ * from sources that include one, such as a future Unix table. Rows without a
+ * command line are skipped.
+ */
+function commandsFromSockets(sockets) {
+  const commands = new Map();
+  for (const socket of sockets || []) {
+    const pid = Number(socket.pid);
+    if (Number.isFinite(pid) && pid > 0 && socket.command) {
+      commands.set(pid, String(socket.command));
+    }
+  }
+  return commands;
 }
 
 /**
@@ -264,7 +313,15 @@ async function mapProcessNames(pids) {
  */
 async function mapProcessCommands() {
   const commands = new Map();
-  if (!IS_WINDOWS) return commands;
+
+  if (!IS_WINDOWS) {
+    const out = await run('ps', ['-eo', 'pid=,args=']);
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.trim().match(/^(\d+)\s+(.*)$/);
+      if (m) commands.set(Number(m[1]), m[2]);
+    }
+    return commands;
+  }
 
   const cmd =
     "$ErrorActionPreference='SilentlyContinue';" +
@@ -415,10 +472,12 @@ function describeHost() {
 
 module.exports = {
   listSockets,
+  listSocketTable,
   candidatePorts,
   pickSocket,
   mapProcessNames,
   mapProcessCommands,
+  commandsFromSockets,
   detectProject,
   parseNetstat,
   describeHost,

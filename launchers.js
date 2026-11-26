@@ -97,6 +97,15 @@ function quote(token) {
 }
 
 /**
+ * The last segment of a path, whichever separator it uses. A stored Windows
+ * command line still has to be understood when the tests run on Linux.
+ */
+function imageName(value) {
+  const parts = String(value || '').split(/[\\/]/);
+  return (parts[parts.length - 1] || '').toLowerCase();
+}
+
+/**
  * Many servers are started through a shell, so the process table holds
  * `cmd.exe /d /s /c "vite"` rather than `vite`. The inner command is the
  * useful part: it is what a person would type again.
@@ -105,7 +114,7 @@ function unwrapShell(raw) {
   const { exe, args } = parseCommandLine(raw);
   if (!exe) return String(raw || '').trim();
 
-  const name = path.basename(exe).toLowerCase();
+  const name = imageName(exe);
 
   if (name === 'cmd.exe' || name === 'cmd') {
     const at = args.findIndex((a) => /^\/[ck]$/i.test(a));
@@ -160,7 +169,7 @@ function normalizeCommand(raw) {
 
 function isSystemImage(image) {
   if (!image) return true;
-  return SYSTEM_IMAGES.has(path.basename(String(image)).toLowerCase());
+  return SYSTEM_IMAGES.has(imageName(image));
 }
 
 function looksSensitive(command) {
@@ -338,6 +347,7 @@ module.exports = {
   MAX_ENTRIES,
   SYSTEM_IMAGES,
   keyOf,
+  imageName,
   tokenize,
   parseCommandLine,
   unwrapShell,

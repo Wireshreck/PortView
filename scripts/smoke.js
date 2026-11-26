@@ -88,6 +88,18 @@ async function main() {
     const names = await get(`${BASE}/api/names`);
     check(names.status === 200, `GET /api/names returned ${names.status}`);
 
+    // The login shortcut relies on a second copy stepping aside quietly when
+    // this one already owns the port.
+    const twin = spawn(process.execPath, [path.join(__dirname, '..', 'server.js'), '--startup'], {
+      env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1' },
+      stdio: 'ignore',
+    });
+    const twinCode = await new Promise((resolve) => {
+      const timer = setTimeout(() => { twin.kill(); resolve('timeout'); }, 10000);
+      twin.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+    });
+    check(twinCode === 0, `a second --startup instance exited with ${twinCode}, expected 0`);
+
     console.log(`viewer answers, ${parsed.openCount} open ports, status "${parsed.status}"`);
     console.log('smoke test passed');
   } catch (err) {

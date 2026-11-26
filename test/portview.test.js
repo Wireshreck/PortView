@@ -8,7 +8,7 @@ const path = require('path');
 
 const services = require('../services');
 const scanner = require('../scanner');
-const { parseNetstat, detectProject } = require('../process-lookup');
+const { parseNetstat, detectProject, commandsFromSockets } = require('../process-lookup');
 const { extractTitle } = require('../web-detect');
 const { createStore } = require('../port-names');
 const launchers = require('../launchers');
@@ -205,6 +205,18 @@ test('a relative script path is ignored rather than misresolved', () => {
 test('no command line means no project', () => {
   assert.equal(detectProject(''), null);
   assert.equal(detectProject(null), null);
+});
+
+test('command lines are taken once from the socket table', () => {
+  const commands = commandsFromSockets([
+    { pid: 42, command: 'node app.js' },
+    { pid: 42, command: 'node app.js' },
+    { pid: 0, command: 'system idle' },
+    { pid: 7 },
+  ]);
+
+  assert.equal(commands.size, 1);
+  assert.equal(commands.get(42), 'node app.js');
 });
 
 /* ------------------------------------------------------------------ *

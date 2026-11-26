@@ -23,6 +23,28 @@ opens your browser.
 
 No dependencies — just Node.js 18 or newer.
 
+### Start at login (Windows)
+
+```powershell
+npm run startup:install
+```
+
+This puts a **PortView** shortcut in your Startup folder. It runs
+`server.js --startup` hidden through `wscript.exe`, so no console window
+appears, and it shows up in **Settings → Apps → Startup** (and Task Manager →
+Startup apps) where it can be switched off like any other app. The server starts
+listening immediately and scans the local TCP ports as soon as it is up.
+
+To stop starting at login:
+
+```powershell
+npm run startup:uninstall
+```
+
+The shortcut points at this checkout. If you move the folder, run
+`startup:install` again. Ports opened later can still be refreshed from the
+page; the login scan just means the table is already filled in when you open it.
+
 ## What it shows
 
 | Column | Meaning |
@@ -148,10 +170,11 @@ A scan runs in two phases.
 
 **Phase 1 — OS socket table (local targets, ~2 seconds).**
 The kernel's own view of every socket is read via `Get-NetTCPConnection` /
-`Get-NetUDPEndpoint` on Windows and `ss` elsewhere. The candidate ports are
-then probed to confirm they really accept connections, and each one is matched
-back to its owning process. This is the authoritative answer and it lands in
-the UI almost immediately.
+`Get-NetUDPEndpoint` on Windows and `ss` elsewhere. The same PowerShell call
+also reads the process table, so a scan pays for one shell start rather than
+three. The candidate ports are then probed to confirm they really accept
+connections, and each one is matched back to its owning process. This is the
+authoritative answer and it lands in the UI almost immediately.
 
 **Phase 2 — deep probe sweep (optional, background).**
 Every port in the selected range is probed with a TCP connect (or a UDP
@@ -221,6 +244,7 @@ All endpoints return JSON.
 | --- | --- | --- |
 | `PORT` | `6969` | HTTP port |
 | `HOST` | `127.0.0.1` | Bind address. Keep it on loopback unless you intend to expose the tool |
+| `PORTVIEW_STARTUP` | unset | `1` acts like `--startup`: scan at boot and exit quietly if the port is already taken |
 
 ```bash
 PORT=8080 node server.js
@@ -237,6 +261,9 @@ port-names.js      Your saved port names (port-names.json)
 launchers.js       Remembered start commands (launchers.json)
 services.js        Port catalogue: names, labels and sections
 scripts/smoke.js   Start, check and stop the server, as CI does
+scripts/startup.vbs           Hidden launcher used at login
+scripts/install-startup.ps1   Register the login shortcut
+scripts/uninstall-startup.ps1 Remove it again
 public/            The viewer (no build step, no framework)
 test/              Tests, run with `npm test`
 ```
@@ -244,7 +271,7 @@ test/              Tests, run with `npm test`
 ## Development
 
 ```bash
-npm test      # 38 tests, no dependencies
+npm test      # 39 tests, no dependencies
 npm run lint  # syntax check across every file
 npm run smoke # start the server on a spare port and check it answers
 ```

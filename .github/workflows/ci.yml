@@ -32,6 +32,22 @@ jobs:
       - name: Check syntax
         run: npm run lint
 
+      - name: Check startup scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in @('scripts/install-startup.ps1', 'scripts/uninstall-startup.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($error in $errors) {
+              Write-Error "$file`: $($error.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: Run tests
         run: npm test
 

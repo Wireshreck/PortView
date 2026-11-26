@@ -7,7 +7,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const { scan, resolveHosts, buildPortList, lanAddresses, checkTcp } = require('./scanner');
-const { listSockets, candidatePorts, pickSocket, mapProcessNames, mapProcessCommands, detectProject, describeHost } = require('./process-lookup');
+const { listSocketTable, candidatePorts, pickSocket, mapProcessNames, mapProcessCommands, detectProject, describeHost } = require('./process-lookup');
 const { detectWeb } = require('./web-detect');
 const portNames = require('./port-names');
 const {
@@ -39,6 +39,10 @@ const {
 const PORT = Number(process.env.PORT || 6969);
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+// Started by the login shortcut: no console, scan straight away, and step
+// aside quietly when a copy is already serving.
+const STARTUP = process.argv.includes('--startup') || process.env.PORTVIEW_STARTUP === '1';
 
 /* ------------------------------------------------------------------ *
  * State
@@ -335,10 +339,10 @@ async function detectWebTitles() {
  * consulted when some names are still missing.
  */
 async function resolveSockets() {
-  const sockets = await listSockets();
+  const { sockets, commands } = await listSocketTable();
   const missing = sockets.filter((s) => s.pid > 0 && !s.name).map((s) => s.pid);
   const names = missing.length ? await mapProcessNames(missing) : new Map();
-  return { sockets, names };
+  return { sockets, names, commands };
 }
 
 /**
@@ -542,9 +546,12 @@ function processNameOf(sock, names) {
 
 /**
  * Fill in PID / process / address for every known port.
+ *
+ * A fast-path scan already fetched the socket table; passing it in avoids a
+ * second PowerShell run during the same scan.
  */
-async function applyProcessInfo() {
-  const { sockets, names } = await resolveSockets();
+async function applyProcessInfo(table) {
+  const { sockets, names } = table || await resolveSockets();
 
   for (const entry of state.open) {
     const chosen = pickSocket(sockets, entry.port, entry.protocol);
@@ -571,7 +578,7 @@ async function applyProcessInfo() {
  * connection on ports that are merely reserved by a closing socket.
  */
 async function fastPath(protocol, portSet) {
-  const { sockets, names } = await resolveSockets();
+  const { sockets, names, commands } = await resolveSockets();
   const wanted = new Set(buildPortList(portSet, state.startPort, state.endPort));
   const candidates = candidatePorts(sockets, protocol);
   const ports = [...candidates.keys()].filter((p) => wanted.has(p)).sort((a, b) => a - b);
@@ -626,7 +633,7 @@ async function fastPath(protocol, portSet) {
   decorateEntries();
   broadcast('state', snapshot());
 
-  return { count, confirmed: seen };
+  return { count, confirmed: seen, table: { sockets, names, commands } };
 }
 
 async function runScan(options) {
@@ -636,11 +643,13 @@ async function runScan(options) {
 
   // Phase 1 - authoritative OS socket table (local targets only).
   let confirmed = null;
+  let table = null;
   if (isLocal) {
     const t0 = Date.now();
     try {
       const res = await fastPath(protocol, state.portSet);
       confirmed = res.confirmed;
+      table = res.table;
       log(`Listener table resolved in ${Date.now() - t0}ms.`);
     } catch (err) {
       log(`Listener table unavailable: ${err.message}`, 'warn');
@@ -654,7 +663,7 @@ async function runScan(options) {
     log('Deep probe disabled — showing OS listener table only.');
     state.total = state.open.length;
     state.scanned = state.total;
-    return;
+    return { table };
   }
 
   const isLoopback = hosts.every((h) => h === '127.0.0.1' || h === '::1');
@@ -711,6 +720,8 @@ async function runScan(options) {
   if (probeOnly) {
     log(`Ignored ${probeOnly} probe-only port${probeOnly === 1 ? '' : 's'} (not held by any OS socket).`);
   }
+
+  return { table };
 }
 
 /**
@@ -761,7 +772,8 @@ function startScan(options = {}) {
 
   (async () => {
     try {
-      await runScan(opts);
+      const outcome = await runScan(opts);
+      const table = outcome && outcome.table;
 
       state.finishedAt = Date.now();
       state.durationMs = state.finishedAt - state.startedAt;
@@ -781,7 +793,7 @@ function startScan(options = {}) {
       }
 
       try {
-        const info = await applyProcessInfo();
+        const info = await applyProcessInfo(table);
         log(`Resolved ${info.sockets} socket${info.sockets === 1 ? '' : 's'} / ${info.named} process name${info.named === 1 ? '' : 's'}.`);
       } catch (err) {
         log(`Process lookup failed: ${err.message}`, 'warn');
@@ -794,9 +806,9 @@ function startScan(options = {}) {
         log(`Page title detection failed: ${err.message}`, 'warn');
       }
 
-      let commands = null;
+      let commands = table && table.commands && table.commands.size ? table.commands : null;
       try {
-        commands = await mapProcessCommands();
+        if (!commands) commands = await mapProcessCommands();
         const projects = await detectProjectNames(commands);
         if (projects.size) {
           const named = [...projects.values()].map((p) => p.name);
@@ -1107,8 +1119,25 @@ server.on('clientError', (err, socket) => {
   if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    // At login a copy may already be serving; that copy is enough.
+    if (STARTUP) process.exit(0);
+    console.error(`\n  Port ${PORT} is already in use. PortView may already be running at http://${HOST}:${PORT}\n`);
+    process.exit(1);
+  }
+
+  console.error(`\n  Server error: ${err.message}\n`);
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`\n  PortView running at http://${HOST}:${PORT}\n`);
+
+  if (STARTUP) {
+    log('Startup mode: scanning local TCP ports.');
+    startScan({ target: 'localhost', protocol: 'tcp', portSet: 'all', deep: false });
+  }
 });
 
 process.on('uncaughtException', (err) => {
