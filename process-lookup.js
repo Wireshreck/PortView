@@ -396,6 +396,10 @@ function detectProject(commandLine) {
   // A globally installed npm package.
   for (const token of tokens) {
     if (!/node_modules/i.test(token)) continue;
+    // "node_modules/.bin/../pkg/bin/cli.js" is an npm shim, not a package.
+    // Treating ".bin" as the package would make it the project name and
+    // working directory, so leave the path for the script check below.
+    if (/[\\/]node_modules[\\/]\.bin([\\/]|$)/i.test(token)) continue;
     const pkgDir = packageDirFromPath(token);
     if (!pkgDir) continue;
     const named = readPackageName(pkgDir);

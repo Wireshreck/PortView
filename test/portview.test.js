@@ -198,6 +198,24 @@ test('an npm package in node_modules is found', () => {
   assert.match(project.name, /some tool/);
 });
 
+test('an npm .bin shim resolves to the project, not the shim folder', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'portview-shim-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'my-test-app' }));
+
+    // The shape npm writes for a local dependency: node_modules/.bin/../pkg/cli.js
+    const script = [root, 'node_modules', '.bin', '..', 'vite', 'bin', 'vite.js'].join(path.sep);
+    const project = detectProject(`"${process.execPath}" "${script}"`);
+
+    assert.ok(project);
+    assert.equal(project.name, 'my test app');
+    assert.equal(project.path, root);
+    assert.equal(project.source, 'package.json');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a relative script path is ignored rather than misresolved', () => {
   assert.equal(detectProject('"C:\\nodejs\\node.exe" server.js'), null);
 });
